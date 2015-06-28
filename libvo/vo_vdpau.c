@@ -166,6 +166,7 @@ static int                                force_mixer;
 static int                                top_field_first;
 static int                                flip;
 static int                                hqscaling;
+static int                                hevc_hack;
 
 static VdpDecoder                         decoder;
 static int                                decoder_max_refs;
@@ -254,12 +255,16 @@ static void video_to_output_surface(void)
         push_deint_surface(surface_render[vid_surface_num].surface);
 
     for (i = 0; i <= !!(deint > 1); i++) {
-        int field = VDP_VIDEO_MIXER_PICTURE_STRUCTURE_FRAME;
+        int field = hevc_hack ? VDP_VIDEO_MIXER_PICTURE_STRUCTURE_TOP_FIELD :
+                                VDP_VIDEO_MIXER_PICTURE_STRUCTURE_FRAME;
         VdpOutputSurface output_surface;
         if (i) {
             draw_eosd();
             draw_osd();
             flip_page();
+        }
+        if (hevc_hack) {
+          field = VDP_VIDEO_MIXER_PICTURE_STRUCTURE_TOP_FIELD;
         }
         if (deint)
             field = (top_field_first == i) ^ (deint > 1) ?
@@ -275,7 +280,7 @@ static void video_to_output_surface(void)
                                         field, 2, deint_surfaces + 1,
                                         deint_surfaces[0],
                                         1, &surface_render[vid_surface_num].surface,
-                                        &src_rect_vid,
+                                        NULL, //&src_rect_vid,
                                         output_surface,
                                         NULL, &out_rect_vid, 0, NULL);
         CHECK_ST_WARNING("Error when calling vdp_video_mixer_render")
@@ -504,9 +509,13 @@ static int create_vdp_mixer(VdpChromaType vdp_chroma_type)
         VDP_VIDEO_MIXER_PARAMETER_VIDEO_SURFACE_HEIGHT,
         VDP_VIDEO_MIXER_PARAMETER_CHROMA_TYPE
     };
+    uint32_t height = vid_height;
+    if (hevc_hack) {
+        height *= 2;
+    }
     const void *const parameter_values[VDP_NUM_MIXER_PARAMETER] = {
         &vid_width,
-        &vid_height,
+        &height,
         &vdp_chroma_type
     };
     features[feature_count++] = VDP_VIDEO_MIXER_FEATURE_DEINTERLACE_TEMPORAL;
@@ -623,11 +632,16 @@ static int create_vdp_decoder(uint32_t format, uint32_t width, uint32_t height,
 #ifdef VDP_DECODER_PROFILE_HEVC_MAIN;
     case IMGFMT_VDPAU_HEVC:
         vdp_decoder_profile = VDP_DECODER_PROFILE_HEVC_MAIN;
+        hevc_hack = 1;
+        deint = 0; // Deinterlacer is not supported and causes problems
         mp_msg(MSGT_VO, MSGL_V, "[vdpau] Creating HEVC hardware decoder for %d reference frames.\n", max_refs);
         break;
 #endif
     default:
         goto err_out;
+    }
+    if (hevc_hack) {
+        height *= 2;
     }
     vdp_st = vdp_decoder_create(vdp_device, vdp_decoder_profile,
                                 width, height, max_refs, &decoder);
@@ -1067,8 +1081,12 @@ static struct vdpau_render_state *get_surface(int number)
         return NULL;
     if (surface_render[number].surface == VDP_INVALID_HANDLE) {
         VdpStatus vdp_st;
+        uint32_t height = vid_height;
+        if (hevc_hack) {
+          height *= 2;
+        }
         vdp_st = vdp_video_surface_create(vdp_device, vdp_chroma_type,
-                                          vid_width, vid_height,
+                                          vid_width, height,
                                           &surface_render[number].surface);
         CHECK_ST_WARNING("Error when calling vdp_video_surface_create")
         if (vdp_st != VDP_STATUS_OK)
@@ -1306,6 +1324,7 @@ static int preinit(const char *arg)
     colorspace = 1;
     force_mixer = 1;
     hqscaling = 0;
+    hevc_hack = 0;
     if (subopt_parse(arg, subopts) != 0) {
         mp_msg(MSGT_VO, MSGL_FATAL, help_msg);
         return -1;
